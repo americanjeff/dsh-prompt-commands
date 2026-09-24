@@ -104,12 +104,16 @@ export function apply(ctx, config = {}) {
    * @returns {Promise<string | undefined>}
    */
   const resolveTemplateEffort = async (agent, coarse, route, signal) => {
-    if (ctx.llm?.resolveModelInfo === undefined) return undefined
+    // `ctx.get`, not a property read: cordis context proxies only expose
+    // injected services as properties (an uninjected read throws), and the
+    // llm service must degrade to "no effort" when absent.
+    const llm = ctx.get('llm')
+    if (llm?.resolveModelInfo === undefined) return undefined
     const headerConfig = agent.session?.requestHeader?.()?.config
     const provider = route.provider ?? headerConfig?.provider ?? agent.options?.provider
     const model = route.model ?? headerConfig?.model ?? agent.options?.model
     if (provider === undefined || model === undefined) return undefined
-    return resolveEffort(coarse, { provider, model, llm: ctx.llm, signal })
+    return resolveEffort(coarse, { provider, model, llm, signal })
   }
 
   /**

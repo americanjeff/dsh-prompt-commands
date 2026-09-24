@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-commands",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "description": "pi-style prompt templates for dsh: .agents/prompts markdown templates dynamically registered as slash commands, compatible with pi's prompt template format.",
   "author": "American Jeff <jeff@americanjeff.com>",
@@ -35,7 +35,8 @@
     "index.js",
     "lib",
     "dsh.cordis.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test test/"

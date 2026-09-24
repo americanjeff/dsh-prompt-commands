@@ -5,6 +5,8 @@ commands** — one command per template file, named after the file. New, edited,
 and deleted templates take effect in existing sessions without a restart. Any
 template pi accepts (`.pi/prompts/*.md` format) loads unchanged.
 
+Changelog: [CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/americanjeff/dsh-prompt-commands/releases)
+
 ## Install
 
 ```sh

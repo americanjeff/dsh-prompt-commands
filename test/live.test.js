@@ -43,6 +43,11 @@ function makeCommands() {
  * fake registry plus effect() (recorded for unload). `services` stands in
  * for ctx.get() lookups (e.g. 'subagents', 'llm'); 'agents' absent keeps the
  * per-agent project layer dormant.
+ *
+ * Wrapped in a proxy that mirrors the cordis context contract: reading an
+ * un-injected service as a PROPERTY throws (the real Context proxy does),
+ * so production code that must use ctx.get() cannot lean on a property the
+ * fake would silently supply.
  */
 function makeCtx(commands, services = {}, { logger = { warn() {} } } = {}) {
   const unloads = []
@@ -61,7 +66,6 @@ function makeCtx(commands, services = {}, { logger = { warn() {} } } = {}) {
     },
     on() {},
     get: (name) => services[name],
-    llm: services.llm,
     unload() {
       for (const dispose of [...unloads].reverse()) {
         const settled = dispose()
@@ -71,7 +75,12 @@ function makeCtx(commands, services = {}, { logger = { warn() {} } } = {}) {
     },
     effectCount: () => unloads.length,
   }
-  return ctx
+  return new Proxy(ctx, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'symbol' || prop in target) return Reflect.get(target, prop, receiver)
+      throw new Error(`cannot get property "${String(prop)}" without inject`)
+    },
+  })
 }
 
 describe('live discovery (index.js)', () => {
