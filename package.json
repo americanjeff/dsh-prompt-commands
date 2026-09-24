@@ -1,0 +1,57 @@
+{
+  "name": "dsh-prompt-commands",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "pi-style prompt templates for dsh: .agents/prompts markdown templates dynamically registered as slash commands, compatible with pi's prompt template format.",
+  "author": "American Jeff <jeff@americanjeff.com>",
+  "homepage": "https://github.com/americanjeff/dsh-prompt-commands",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/americanjeff/dsh-prompt-commands.git"
+  },
+  "bugs": {
+    "url": "https://github.com/americanjeff/dsh-prompt-commands/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "prompts",
+    "slash-commands",
+    "templates"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./lib/template.js": "./lib/template.js",
+    "./lib/effort.js": "./lib/effort.js"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "dsh.cordis.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh.cordis.yml"
+    }
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-llm": "alpha"
+  }
+}

@@ -1,0 +1,22 @@
+# dsh-prompt-commands bundle patch layer: mounts the prompt-commands
+# plugin row.
+#
+# The plugin discovers pi-style prompt templates and dynamically registers
+# them as slash commands. Default roots (mirroring the skill roots): the
+# session project's `.agents/prompts` (per agent, shadowing globals) and
+# `~/.agents/prompts` (global).
+#
+# The row ships with no config. Add a `config` block here (or override it in
+# a profile patch layer, e.g. `- id: prompt-commands` + `config:`) for
+# deployment-specific values:
+#
+#   promptDirs: [dir, ...]   — extra template dirs (files only, non-recursive);
+#                              scanned before the user root (they win name collisions).
+#   subagent:                — default model route for templates declared
+#     provider: str          —   `execution: subagent`; absent fields inherit
+#     model: str             —   the session's route.
+#     maxTokens: int
+#     effort: str            —   coarse effort default (low | medium | high).
+- insert:
+  - id: prompt-commands
+    name: 'dsh-prompt-commands'
