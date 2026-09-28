@@ -1,57 +1,9 @@
 /**
- * `dsh-prompt-commands`: pi-style prompt templates for dsh.
- *
- * Markdown prompt templates (pi's `.pi/prompts/*.md` format: YAML
- * frontmatter `description` / `argument-hint`, a body with `$1…$N`, `$@`,
- * `$ARGUMENTS`, `${@:N}`, `${@:N:L}` placeholders) are DISCOVERED at boot and
- * DYNAMICALLY REGISTERED as slash commands — one command per template,
- * named after the file. Templates compatible with pi load unchanged
- * (peff's `src/prompts/*.md` included).
- *
- * Default template roots (mirroring where dsh finds skills):
- *
- * - PROJECT (per agent, registered agent-scoped so each session sees its
- *   own project's templates, shadowing globals):
- *   `<projectRoot>/.agents/prompts` — projectRoot is the nearest `.git`
- *   marker at or above the session's cwd, exactly like the skill provider.
- * - USER (global): `~/.agents/prompts` (`$DSH_AGENTS_HOME/prompts` when set).
- * - CUSTOM (global, from the row config `promptDirs`): explicit directories;
- *   registered BEFORE the user root so explicit config wins name collisions.
- *
- * Delivery per invocation (frontmatter `execution` selects; default
- * `inline`):
- *
- * - `inline` — the expanded template is sent to the INVOKING agent via
- *   `agent.followup()` as an ordinary user message (pi-faithful: the model
- *   sees the expanded prompt as a user prompt and answers in the session).
- * - `subagent` — the expanded template runs in a fresh one-shot subagent
- *   (`subagents.start('spawn', …)`); the command settles as "started"
- *   immediately, a non-waking "started" notice is injected at admission,
- *   and a follow-up "result" notice arrives when the child settles. The
- *   child's model route is the row config `subagent: {provider, model,
- *   maxTokens}` when present, otherwise the session's route.
- *
- * Coarse reasoning effort (frontmatter `effort: low | medium | high`, with
- * the row config `subagent.effort` as deployment default): at spawn the
- * level maps onto the resolved child route's advertised effort ladder —
- * low → lowest rung, medium → middle rung, high → highest rung, reasoning-off
- * rungs excluded. A route that cannot be resolved, or that advertises no
- * usable rung, drops the effort with a logged warning (the child runs its
- * route default). On `inline` templates the field is inert and logged: a
- * session's reasoning effort is durable state (its request header), not a
- * per-turn dial, so there is no temporary session-side application.
- *
- * Discovery is LIVE: every template directory is watched (fs.watch, with a
- * poll fallback while the directory is absent), and new/changed/removed
- * templates are registered/unregistered in the command registry as they
- * happen — no server restart and no new session needed. Editing a template's
- * BODY or its `effort` needs nothing (the file is re-read at each
- * invocation); editing its frontmatter (description / argument-hint)
- * re-registers the command so the slash popup stays current.
- *
- * Host half: a plain namespace cordis plugin (`name`/`apply`); there is no
- * browser half (templates appear in the web slash-popup through the
- * command registry's own discovery, which notifies clients of changes).
+ * `dsh-prompt-commands`: pi-style prompt templates for dsh — markdown
+ * templates discovered live from `.agents/prompts` roots and dynamically
+ * registered as slash commands, one per file. Template format, default
+ * roots, delivery modes (`inline` / `subagent`), and effort mapping: see
+ * README.md.
  * @module dsh-prompt-commands
  */
 import { statSync, watch } from 'node:fs'
@@ -72,15 +24,19 @@ export const name = 'prompt-commands'
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ promptDirs?: string[], subagent?: { provider?: string, model?: string, maxTokens?: number, effort?: 'low' | 'medium' | 'high' } }} [config]
+ * @param {{ promptDirs?: string[], subagent?: { provider?: string, model?: string, maxTokens?: number, effort?: 'none' | 'low' | 'medium' | 'high' }, lang?: 'en' | 'zh' }} [config]
  *   - `promptDirs`: extra template directories (files only, non-recursive),
  *     scanned before the user root so they win name collisions.
  *   - `subagent`: default model route and coarse effort for
  *     `execution: subagent` templates; absent fields inherit the session's
  *     route / apply no effort (frontmatter `effort` wins over the config).
+ *   - `lang`: language of the plugin's own user-facing copy (fallback
+ *     description, result texts, notices): `'en'` (default) or `'zh'`.
+ *     Template content is user-written and unaffected.
  */
 export function apply(ctx, config = {}) {
   validateConfig(config)
+  const str = STRINGS[config.lang ?? 'en']
 
   const agentsHome = resolve(process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'))
   const userRoot = join(agentsHome, 'prompts')
@@ -98,7 +54,7 @@ export function apply(ctx, config = {}) {
    * Returns `undefined` when the route is unresolvable or advertises no
    * usable rung; the caller warns and spawns without an effort.
    * @param {unknown} agent - the handler's agent handle.
-   * @param {'low' | 'medium' | 'high'} coarse
+   * @param {'none' | 'low' | 'medium' | 'high'} coarse
    * @param {{ provider?: string, model?: string }} route - the config route (effort already split off).
    * @param {AbortSignal} signal
    * @returns {Promise<string | undefined>}
@@ -126,10 +82,10 @@ export function apply(ctx, config = {}) {
     try {
       current = await loadTemplateFile(template.filePath, { source: template.source })
     } catch (error) {
-      return { kind: 'error', text: `/${template.name}: the template file is now invalid: ${messageOf(error)}` }
+      return { kind: 'error', text: str.fileInvalid(template.name, messageOf(error)) }
     }
     if (current === undefined) {
-      return { kind: 'error', text: `/${template.name}: the template file no longer exists: ${template.filePath}` }
+      return { kind: 'error', text: str.fileGone(template.name, template.filePath) }
     }
 
     const text = expandTemplate(current, rawInput)
@@ -137,7 +93,7 @@ export function apply(ctx, config = {}) {
     if (current.execution === 'subagent') {
       const subagents = ctx.get('subagents')
       if (subagents === undefined) {
-        return { kind: 'error', text: `/${template.name} is declared with execution: subagent, but this deployment composes no subagents service` }
+        return { kind: 'error', text: str.noSubagents(template.name) }
       }
 
       // Coarse effort: template frontmatter wins over the row config
@@ -166,34 +122,25 @@ export function apply(ctx, config = {}) {
           ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
         })
       } catch (error) {
-        return { kind: 'error', text: `Failed to start the ${template.name} subagent: ${messageOf(error)}` }
+        return { kind: 'error', text: str.spawnFailed(template.name, messageOf(error)) }
       }
 
       // The chat is free while the child works: the model is blind to
       // in-flight subagents, so tell it one is in flight (a dsh restart
       // between the two notices must not leave a dangling "running" belief).
-      deliverNotice(
-        agent,
-        `A /${template.name} subagent has just started${appliedEffort !== undefined ? ` (effort: ${appliedEffort})` : ''}. A follow-up notice will report the outcome; do not start another /${template.name} for the same request in the meantime.`,
-        labelFor(template.name, rawInput),
-      )
+      deliverNotice(agent, str.startedNotice(template.name, appliedEffort), labelFor(template.name, rawInput))
 
       // Admission is the last thing the caller signal owns; afterwards the
       // subagent manager owns the run independently, so it survives this
       // handler returning and the UI request settling.
       void run.result
-        .then((result) => deliverResultNotice(agent, template.name, result))
-        .catch((error) => deliverNotice(agent, `A /${template.name} subagent failed: ${messageOf(error)}`, `${template.name} FAILED — error`))
+        .then((result) => deliverResultNotice(str, agent, template.name, result))
+        .catch((error) => deliverNotice(agent, str.failedNotice(template.name, messageOf(error)), str.failSummary(template.name, str.errorWord)))
         .finally(() => {
           try { run.dispose?.() } catch { /* best-effort release */ }
         })
 
-      return {
-        kind: 'success',
-        text: appliedEffort !== undefined
-          ? `Started at effort ${appliedEffort} — result will arrive as a context notice.`
-          : 'Started — result will arrive as a context notice.',
-      }
+      return { kind: 'success', text: str.started(appliedEffort) }
     }
 
     // Default (inline): the expanded prompt is an ordinary user message on
@@ -211,7 +158,7 @@ export function apply(ctx, config = {}) {
         source: { kind: 'user' },
       }))
     } catch (error) {
-      return { kind: 'error', text: `Failed to send the expanded prompt: ${messageOf(error)}` }
+      return { kind: 'error', text: str.followupFailed(messageOf(error)) }
     }
     return { kind: 'success' }
   }
@@ -249,7 +196,7 @@ export function apply(ctx, config = {}) {
       try {
         const disposer = register({
           name: template.name,
-          description: commandDescription(template),
+          description: commandDescription(str, template),
           ...(template.argumentHint === undefined ? {} : { input: { hint: template.argumentHint } }),
           handler: makeHandler(template),
         })
@@ -509,16 +456,57 @@ export function apply(ctx, config = {}) {
   })
 }
 
-// ── command metadata and notices ─────────────────────────────────────────────
+/** The plugin's own user-facing copy per `lang`; template content and journal/boot strings stay as written. */
+const STRINGS = {
+  en: {
+    errorWord: 'error',
+    promptTemplate: (name) => `Prompt template: ${name}`,
+    started: (effort) => effort !== undefined
+      ? `Started at effort ${effort} — result will arrive as a context notice.`
+      : 'Started — result will arrive as a context notice.',
+    fileInvalid: (name, message) => `/${name}: the template file is now invalid: ${message}`,
+    fileGone: (name, path) => `/${name}: the template file no longer exists: ${path}`,
+    noSubagents: (name) => `/${name} is declared with execution: subagent, but this deployment composes no subagents service`,
+    spawnFailed: (name, message) => `Failed to start the ${name} subagent: ${message}`,
+    followupFailed: (message) => `Failed to send the expanded prompt: ${message}`,
+    startedNotice: (name, effort) => `A /${name} subagent has just started${effort !== undefined ? ` (effort: ${effort})` : ''}. A follow-up notice will report the outcome; do not start another /${name} for the same request in the meantime.`,
+    failedNotice: (name, message) => `A /${name} subagent failed: ${message}`,
+    notCompleted: (name, stopReason, diagnostic, output) => `A /${name} subagent did NOT complete — it ended with “${stopReason}”${diagnostic ? ` (${diagnostic})` : ''}${output ? `: ${output}` : ''}. Retry /${name} if the task should have succeeded.`,
+    finished: (name, output) => `A /${name} subagent just finished. Its final output: ${output}. Do not re-report this result unless asked.`,
+    noOutput: '(no output)',
+    failSummary: (name, reason) => `${name} FAILED — ${reason}`,
+    doneSummary: (name, firstLine) => `${name} done — ${firstLine}`,
+  },
+  zh: {
+    errorWord: '错误',
+    promptTemplate: (name) => `提示模板：${name}`,
+    started: (effort) => effort !== undefined
+      ? `已以 ${effort} 推理强度启动——结果将以上下文通知送达。`
+      : '已启动——结果将以上下文通知送达。',
+    fileInvalid: (name, message) => `/${name}：模板文件当前无效：${message}`,
+    fileGone: (name, path) => `/${name}：模板文件已不存在：${path}`,
+    noSubagents: (name) => `/${name} 声明了 execution: subagent，但当前部署未组合 subagents 服务`,
+    spawnFailed: (name, message) => `无法启动 ${name} 子代理：${message}`,
+    followupFailed: (message) => `发送展开后的提示失败：${message}`,
+    startedNotice: (name, effort) => `/${name} 子代理刚刚启动${effort !== undefined ? `（推理强度：${effort}）` : ''}。后续通知将报告结果；在此期间请勿为同一请求再次启动 /${name}。`,
+    failedNotice: (name, message) => `/${name} 子代理运行失败：${message}`,
+    notCompleted: (name, stopReason, diagnostic, output) => `/${name} 子代理未正常完成——它以「${stopReason}」结束${diagnostic ? `（${diagnostic}）` : ''}${output ? `：${output}` : ''}。如果任务本应成功，请重试 /${name}。`,
+    finished: (name, output) => `/${name} 子代理刚刚完成。最终输出：${output}。除非被要求，请勿再次汇报此结果。`,
+    noOutput: '（无输出）',
+    failSummary: (name, reason) => `${name} 失败 — ${reason}`,
+    doneSummary: (name, firstLine) => `${name} 完成 — ${firstLine}`,
+  },
+}
 
 /**
  * A dsh command description must be non-empty; pi allows an empty one, so
  * fall back to a stable generated line.
+ * @param {{ promptTemplate(name: string): string }} str - the active language table.
  * @param {{ name: string, description: string }} template
  * @returns {string}
  */
-function commandDescription(template) {
-  return template.description.length > 0 ? template.description : `Prompt template: ${template.name}`
+function commandDescription(str, template) {
+  return template.description.length > 0 ? template.description : str.promptTemplate(template.name)
 }
 
 /** Subagent label: the template name, plus its first argument when one was given. */
@@ -528,35 +516,27 @@ function labelFor(name, rawInput) {
 }
 
 /** One-line final output, for the result notice's collapsed-row summary. */
-function firstLineOf(text) {
-  return text.split('\n').find((line) => line.trim()) ?? '(no output)'
+function firstLineOf(text, noOutput) {
+  return text.split('\n').find((line) => line.trim()) ?? noOutput
 }
 
 /** Report a settled subagent run as a non-waking context notice. */
-function deliverResultNotice(agent, name, result) {
+function deliverResultNotice(str, agent, name, result) {
   const finalText = (result.output ?? [])
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('\n')
     .trim()
   if (result.stopReason !== 'completed') {
-    const diagnostic = result.diagnostic ? ` (${result.diagnostic})` : ''
     deliverNotice(
       agent,
-      `A /${name} subagent did NOT complete — it ended with “${result.stopReason}”${diagnostic}` +
-        (finalText ? `: ${finalText}` : '') +
-        `. Retry /${name} if the task should have succeeded.`,
-      `${name} FAILED — ${result.stopReason}`,
+      str.notCompleted(name, result.stopReason, result.diagnostic, finalText !== '' ? finalText : undefined),
+      str.failSummary(name, result.stopReason),
     )
     return
   }
-  deliverNotice(
-    agent,
-    `A /${name} subagent just finished. Its final output: ${finalText === '' ? '(no output)' : finalText.slice(0, 500)}` +
-      (finalText.length > 500 ? '…' : '') +
-      '. Do not re-report this result unless asked.',
-    `${name} done — ${firstLineOf(finalText)}`,
-  )
+  const shown = finalText === '' ? str.noOutput : finalText.slice(0, 500) + (finalText.length > 500 ? '…' : '')
+  deliverNotice(agent, str.finished(name, shown), str.doneSummary(name, firstLineOf(finalText, str.noOutput)))
 }
 
 /**
@@ -572,14 +552,13 @@ function deliverNotice(agent, text, summary) {
     agent.inject(createUserMessage({
       content: [{ type: 'text', text }],
       source: {
-        kind: 'plugin',
-        plugin: 'prompt-commands',
+        kind: 'plugin:prompt-commands',
         form: 'notice',
         summary: boundContextSummary(summary),
       },
     }))
   } catch {
-    /* session gone or not injectable — best-effort delivery */
+    /* best-effort */
   }
 }
 
@@ -590,6 +569,9 @@ function messageOf(err) {
 
 /** Validate the row config, failing loud at boot (dsh plugin convention). */
 function validateConfig(config) {
+  if (config.lang !== undefined && config.lang !== 'en' && config.lang !== 'zh') {
+    throw new TypeError('prompt-commands config.lang must be "en" or "zh"')
+  }
   if (config.promptDirs !== undefined) {
     if (!Array.isArray(config.promptDirs) || config.promptDirs.some((dir) => typeof dir !== 'string' || dir.length === 0)) {
       throw new TypeError('prompt-commands config.promptDirs must be an array of non-empty directory paths')
@@ -610,7 +592,7 @@ function validateConfig(config) {
         }
       } else if (key === 'effort') {
         if (typeof value !== 'string' || !EFFORT_LEVELS.includes(value)) {
-          throw new TypeError('prompt-commands config.subagent.effort must be "low", "medium", or "high"')
+          throw new TypeError('prompt-commands config.subagent.effort must be "none", "low", "medium", or "high"')
         }
       } else {
         throw new TypeError(`prompt-commands config.subagent has unknown field "${key}" (expected provider, model, maxTokens, or effort)`)

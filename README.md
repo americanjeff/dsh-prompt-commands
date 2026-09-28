@@ -24,8 +24,20 @@ config:
     provider: llama-swap      #   route fields left absent inherit the session's route
     model: qwen3.8-27b
     maxTokens: 8192
-    effort: high              #   coarse effort default (low | medium | high); see `effort`
+    effort: high              #   coarse effort default (none | low | medium | high); see `effort`
+  lang: zh                    # optional: en (default) | zh — the plugin's own UI copy
 ```
+
+`lang` sets the language of the plugin's fixed strings — the fallback
+command description, the "started" result text, and the subagent notices.
+Template content is yours and unaffected: write templates in any language.
+Upstream error text embedded in those strings (dsh / `yaml` messages) keeps
+its original language.
+
+The row title/description shown in dsh's Settings plugin inventory is
+localized separately through dsh's first-party convention: `locale/en.json`
+and `locale/zh.json` (a `meta.title` / `meta.description` per file), which
+follow the browser's locale setting — no row config needed.
 
 ## Where templates live
 
@@ -50,7 +62,7 @@ directories — share files with pi via symlinks or `promptDirs`.
 description: One-line summary shown in the slash popup
 argument-hint: "[topic]"
 execution: inline            # optional: inline (default) | subagent
-effort: low                  # optional: low | medium | high — subagent templates only
+effort: low                  # optional: none | low | medium | high — subagent templates only
 ---
 Template body with placeholders:
 
@@ -77,22 +89,25 @@ Template body with placeholders:
 
 ### `effort`
 
-Coarse reasoning effort for `execution: subagent` templates: `low`, `medium`,
-or `high`. At spawn the level maps onto one concrete rung of the child
-route's advertised effort ladder — `low` → lowest rung, `medium` → middle
-rung, `high` → highest rung, rungs that switch reasoning off (`off`, `none`,
-…) excluded. Routes expose different ladders (`off·low·medium·xhigh`,
-`low·high`, …), so templates never name a concrete id — on a route whose top
-rung is `xhigh`, `effort: high` spawns at `xhigh`.
+Coarse reasoning effort for `execution: subagent` templates: `none`, `low`,
+`medium`, or `high`. At spawn the level maps onto one concrete rung of the
+child route's advertised effort ladder — `none` → the rung that switches
+reasoning off (when the route advertises one; otherwise the lowest rung),
+`low` → lowest rung, `medium` → middle rung, `high` → highest rung. Routes
+expose different ladders (`off·low·medium·xhigh`, `low·high`, …), so
+templates never name a concrete id — on a route whose top rung is `xhigh`,
+`effort: high` spawns at `xhigh`, and `effort: none` on a route whose off
+rung is `off` spawns at `off`.
 
 - **Precedence**: template frontmatter `effort` > row config
   `subagent.effort` > no effort (the child runs its route's default).
 - **Route**: the ladder is read from the child's actual route — the config
   `subagent` route when it names provider/model, otherwise the session's
   current route.
-- **Degrades safely**: a route that cannot be resolved, or that advertises no
-  reasoning rungs, drops the effort with a logged warning; the child still
-  runs, at its route default.
+- **Degrades safely**: a route that cannot be resolved drops the effort with
+  a logged warning; the child still runs, at its route default. A `none` on a
+  route without an off rung takes the lowest reasoning rung — the spawn
+  confirmation always reports the rung the child actually runs at.
 - **Inert on `inline` templates**: a session's reasoning effort is durable
   state (its request header), not a per-turn dial — dsh has no temporary
   session-side effort switch — so an `inline` template that declares `effort`

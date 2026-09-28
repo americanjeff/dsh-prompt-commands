@@ -237,6 +237,11 @@ describe('row config validation (boot)', () => {
       apply(ctx2, { subagent: { provider: 'p', model: 'm', maxTokens: 100, effort: 'high' } })
       ctx2.unload()
     })
+    const ctx3 = makeCtx(makeCommands())
+    assert.doesNotThrow(() => {
+      apply(ctx3, { subagent: { effort: 'none' } })
+      ctx3.unload()
+    })
   })
 
   test('subagent block rejects unknown fields and non-coarse efforts', () => {
@@ -246,6 +251,20 @@ describe('row config validation (boot)', () => {
       (err) => err instanceof TypeError && /unknown field/.test(err.message))
     assert.throws(() => apply(makeCtx(makeCommands()), { subagent: { effort: 1 } }),
       (err) => err instanceof TypeError && /effort/.test(err.message))
+  })
+
+  test('lang accepts en/zh and rejects unknown values', () => {
+    for (const lang of ['en', 'zh']) {
+      const ctx = makeCtx(makeCommands())
+      assert.doesNotThrow(() => {
+        apply(ctx, { lang })
+        ctx.unload()
+      })
+    }
+    assert.throws(() => apply(makeCtx(makeCommands()), { lang: 'fr' }),
+      (err) => err instanceof TypeError && /lang/.test(err.message))
+    assert.throws(() => apply(makeCtx(makeCommands()), { lang: 1 }),
+      (err) => err instanceof TypeError && /lang/.test(err.message))
   })
 })
 
@@ -348,6 +367,20 @@ describe('subagent effort (handler spawn)', () => {
     assert.deepEqual(mid.calls[0].agentOptions, { reasoningEffort: 'medium' })
   })
 
+  test('effort none maps to the route off rung', async () => {
+    const { calls, outcome } = await invoke({}, 'execution: subagent\neffort: none')
+    assert.deepEqual(calls[0].agentOptions, { reasoningEffort: 'off' })
+    assert.match(outcome.text, /effort off/)
+  })
+
+  test('effort none on a route without an off rung takes the lowest rung', async () => {
+    const { calls, outcome } = await invoke({}, 'execution: subagent\neffort: none', {
+      llmOverride: { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }) },
+    })
+    assert.deepEqual(calls[0].agentOptions, { reasoningEffort: 'low' })
+    assert.match(outcome.text, /effort low/)
+  })
+
   test('no effort declared: the config route goes through unmodified', async () => {
     const { calls } = await invoke({ subagent: { provider: 'llama-swap', model: 'qwen3.8-27b', maxTokens: 4096 } },
       'execution: subagent')
@@ -402,6 +435,12 @@ describe('subagent effort (handler spawn)', () => {
     assert.equal(calls.length, 1)
     assert.equal(calls[0].agentOptions, undefined)
     assert.ok(warnings.some((w) => w.includes('not applied')))
+  })
+
+  test('lang zh renders the plugin copy in Simplified Chinese', async () => {
+    const { outcome } = await invoke({ lang: 'zh' }, 'execution: subagent\neffort: high')
+    assert.equal(outcome.kind, 'success')
+    assert.match(outcome.text, /已以 xhigh 推理强度启动/)
   })
 
   test('inline template with effort: warning logged, ordinary followup still sent', async () => {

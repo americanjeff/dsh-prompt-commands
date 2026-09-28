@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "提示模板",
+    "description": "dsh 的 pi 风格提示模板：.agents/prompts 下的 Markdown 模板动态注册为斜杠命令，兼容 pi 的提示模板格式。"
+  }
+}

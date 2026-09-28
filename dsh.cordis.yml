@@ -16,7 +16,10 @@
 #     provider: str          —   `execution: subagent`; absent fields inherit
 #     model: str             —   the session's route.
 #     maxTokens: int
-#     effort: str            —   coarse effort default (low | medium | high).
+#     effort: str            —   coarse effort default (none | low | medium | high).
+#   lang: str                — language of the plugin's own user-facing copy
+#                              (en | zh; default en). Template content is
+#                              user-written and unaffected.
 - insert:
   - id: prompt-commands
     name: 'dsh-prompt-commands'

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live e2e for dsh-prompt-commands against a scratch web profile.
 
-Verified against dsh 0.1.5-rc.2.
+Verified against dsh 0.2.0-rc.1.
 
 What it does, end to end:
   1. builds a scratch git project with `.agents/prompts/{hello.md,
@@ -36,8 +36,8 @@ Scratch state lives in ./.e2e (git-ignored).
 import json
 import os
 import re
-import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -84,46 +84,93 @@ def sh(args, timeout=600, **kw):
 
 def boot_server(cwd, expect_url=True, extra_args=()):
     env = dict(os.environ, DSH_HOME=str(HOME), DSH_AGENTS_HOME=str(AGENTS_HOME))
+    # Tee the server's output into a persistent log: a respawned server
+    # (plugin reload, restart) lands on a NEW random port, which strands
+    # the open page in "Reconnecting..." — the log is the only way to see
+    # it happened. Each boot appends; the URL wait reads from where this
+    # boot started.
+    log_path = E2E / "server.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    start_offset = log_path.stat().st_size if log_path.exists() else 0
+    log_f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
     proc = subprocess.Popen(
         ["node", str(DSH / "lib" / "bin.js"), "--profile", "e2e", *extra_args,
          "--port", "0", "--no-open"],
-        cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        cwd=str(cwd), env=env, stdout=log_f, stderr=subprocess.STDOUT,
+        # Own process group: the script restarts the server mid-run (plugin
+        # install), so a plain terminate(proc.pid) can miss the respawned
+        # child and leave a stray server holding the scratch profile.
+        start_new_session=True,
     )
+    log_f.close()
     if not expect_url:
         return proc
     deadline = time.time() + 240
     buf = ""
     url = None
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            rest = proc.stdout.read()
-            proc.kill()
-            raise RuntimeError(
-                f"server exited early before printing a URL (code {proc.returncode}); "
-                f"output tail: {buf + rest!r}"[:3000])
-        r, _, _ = select.select([proc.stdout], [], [], 0.5)
-        if r:
-            line = proc.stdout.readline()
-            if not line:  # EOF
+    with open(log_path, "r", encoding="utf-8", errors="replace") as rf:
+        rf.seek(start_offset)
+        while time.time() < deadline:
+            if proc.poll() is not None:
                 proc.kill()
-                raise RuntimeError(f"server closed stdout before printing a URL; output: {buf!r}"[:3000])
-            buf += line
+                raise RuntimeError(
+                    f"server exited early before printing a URL (code {proc.returncode}); "
+                    f"output tail: {buf!r}"[:3000])
+            buf += rf.read()
             m = re.search(r"(http://127\.0\.0\.1:\d+/\?token=\S+)", buf)
             if m:
                 url = m.group(1)
                 break
+            time.sleep(0.5)
     if url is None:
         proc.kill()
         raise RuntimeError("no URL from server boot within deadline")
     return proc, url
 
 
+def _sweep_servers():
+    """Kill stray servers still holding the scratch e2e profile.
+
+    The server daemonizes (setsid) out of the process group we spawn it in,
+    so killpg can miss it, and a caller's shell line that happens to
+    contain the invocation string must not be killed either (pkill -f
+    would). So scan /proc for the scratch invocation and only kill
+    processes outside our own login session: the script and its callers
+    share ours, while every spawned server (start_new_session) — and any
+    daemonized respawn — sits in its own.
+    """
+    mine = os.getsid(0)
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if os.getsid(int(entry.name)) == mine:
+                continue
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", "replace")
+        except (OSError, ProcessLookupError, PermissionError):
+            continue
+        if "lib/bin.js --profile e2e" in cmdline:
+            try:
+                os.kill(int(entry.name), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def stop_server(proc):
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    # The mid-run plugin-install restart replaces the server process, so
+    # signal the whole group, not the (stale) spawn PID.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            proc.wait(timeout=10)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    _sweep_servers()
 
 
 def seed_workspace():
@@ -203,7 +250,94 @@ def popup_has(page, prefix, needle, expect, timeout=15):
     return present == expect
 
 
+class WsMonitor:
+    """Watches the page's websocket to the scratch server via raw CDP.
+
+    The slash popup's command list and all command sends ride the page's
+    websocket. If that socket is down the page sits in "Reconnecting..."
+    and every send-based check fails with zero evidence — so the run is
+    gated on a live connection and the handshake record is reported on
+    failure.
+
+    Readiness is read from CDP (`Network.webSocketHandshakeResponseReceived`
+    with status 101), not from Playwright's high-level ws "open" event: in
+    this environment (Playwright 1.61, Chromium 149/rev 1228) that event
+    never fires even for a working socket — verified against a vanilla ws
+    server where the page's JS `onopen` fires and the server logs the 101,
+    while Playwright reports only created/error/close. A genuinely broken
+    transport still shows up here as a handshake failure, a non-101
+    status, or the page's "Reconnecting..." badge.
+    """
+
+    def __init__(self, url):
+        self.port = re.search(r"127\.0\.0\.1:(\d+)", url).group(1)
+        self.created = []      # every ws URL the page requested
+        self.handshakes = []   # HTTP status of each completed handshake
+        self.failures = []     # handshake-failure error strings
+
+    def attach(self, page):
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Network.enable")
+        cdp.on("Network.webSocketCreated",
+               lambda pr: self.created.append(pr.get("url")))
+        cdp.on("Network.webSocketHandshakeResponseReceived",
+               lambda pr: self.handshakes.append(
+                   (pr.get("response") or {}).get("status")))
+        cdp.on("Network.webSocketHandshakeFailed",
+               lambda pr: self.failures.append(pr.get("error")))
+
+    def reset(self):
+        """Drop the previous page load's record so a reload is judged on
+        its own handshakes."""
+        self.handshakes.clear()
+        self.failures.clear()
+
+    def ok(self, page):
+        """True when a 101 handshake to the scratch server has completed
+        AND the "Reconnecting..." badge is absent — either alone can lie
+        (a badge that lags a recovered connection, or a handshake to a
+        stale URL)."""
+        return (any(s == 101 for s in self.handshakes)
+                and page.get_by_text("Reconnecting").count() == 0)
+
+    def describe(self):
+        return (f"ws created={self.created} handshakes={self.handshakes} "
+                f"failures={self.failures!r}")
+
+
+def wait_ready(page, mon, timeout=15):
+    """Wait until the page's websocket handshake (101) has completed AND
+    the "Reconnecting..." badge is absent."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mon.ok(page):
+            return True
+        page.wait_for_timeout(300)
+    return False
+
+
+def server_log_tail(n=25):
+    log = E2E / "server.log"
+    if not log.exists():
+        return ""
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-n:])
+
+
+def ensure_server(server, phase):
+    """Fail fast with evidence when the scratch server dies mid-run,
+    instead of cascading through every remaining check confused."""
+    code = server.poll()
+    if code is not None:
+        sys.exit(f"E2E: server died before phase '{phase}' (exit code {code}); "
+                 f"server.log tail:\n{server_log_tail()}")
+
+
 def main():
+    # A crashed or leaked run leaves a server holding the scratch profile;
+    # sweep before recreating .e2e so locks and stale state can't poison
+    # this run.
+    _sweep_servers()
     if E2E.exists():
         shutil.rmtree(E2E)
     (PROJ / ".agents" / "prompts").mkdir(parents=True)
@@ -250,8 +384,27 @@ def main():
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(viewport={"width": 1500, "height": 950})
+            mon = WsMonitor(url)
+            mon.attach(page)
             page.goto(url, wait_until="load")
-            page.wait_for_timeout(5000)
+            # If the page's socket to the server does not come up (the page
+            # sits in "Reconnecting..." and every later check cascade-fails
+            # with no evidence), a fresh load usually recovers.
+            ready = False
+            for attempt in range(1, 4):
+                mon.reset()
+                page.wait_for_timeout(4000 if attempt == 1 else 3000)
+                ready = wait_ready(page, mon)
+                if ready:
+                    break
+                print(f"  (page not ready — attempt {attempt}/3, reloading; {mon.describe()})")
+                page.reload(wait_until="load")
+            ensure_server(server, "initial page load")
+            if not ready:
+                print(f"E2E: the page's websocket never established: {mon.describe()}")
+                print("server.log tail:\n" + server_log_tail())
+                browser.close()
+                sys.exit(1)
             dismiss_onboarding(page)
 
             # ── registration: slash popup ──────────────────────────────────
@@ -277,6 +430,7 @@ def main():
                 check("slash popup: peff /plan", "plan" in joined)
 
             # ── inline delivery + expansion ────────────────────────────────
+            ensure_server(server, "inline send")
             page.keyboard.press("Escape")
             page.wait_for_timeout(500)
             focus_composer(page)
@@ -292,6 +446,7 @@ def main():
                   "Say exactly: HELLO_FROM_world." in body)
 
             # ── subagent delivery ──────────────────────────────────────────
+            ensure_server(server, "subagent send")
             focus_composer(page)
             page.keyboard.type("/probe-sub banana", delay=30)
             page.keyboard.press("Enter")
@@ -303,6 +458,7 @@ def main():
                   "Started — result will arrive as a context notice." in body)
 
             # ── live discovery: no restart, open session ───────────────────
+            ensure_server(server, "live discovery")
             # New template in the PROJECT root → command appears live.
             (PROJ / ".agents" / "prompts" / "zproj.md").write_text(
                 "---\ndescription: Live project probe\n---\nSay exactly: ZPROJ.\n")
@@ -315,16 +471,17 @@ def main():
 
             # Delete the project file → command disappears live.
             (PROJ / ".agents" / "prompts" / "zproj.md").unlink()
-            popup_has(page, "z", "zproj", expect=False, timeout=10)
+            popup_has(page, "z", "zproj", expect=False, timeout=20)
 
             browser.close()
 
         # ── session-log evidence: started + result notices ────────────────
+        ensure_server(server, "session log checks")
         time.sleep(3)
         log_text = ""
         sessions = HOME / "sessions"
         if sessions.exists():
-            for f in sessions.rglob("session.v3.jsonl.zstd"):
+            for f in sessions.rglob("session.v*.jsonl.zstd"):
                 try:
                     log_text += subprocess.run(
                         ["zstd", "-dc", str(f)], capture_output=True, text=True).stdout
@@ -341,8 +498,13 @@ def main():
     print()
     if failures:
         print(f"E2E: {len(failures)} FAILURE(S): {failures}")
+        print("evidence: " + mon.describe())
+        tail = server_log_tail()
+        if tail:
+            print("server.log tail:\n" + tail)
         sys.exit(1)
     print("E2E: all checks passed")
+    print("ws at end: " + mon.describe())
 
 
 if __name__ == "__main__":

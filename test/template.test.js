@@ -605,6 +605,19 @@ describe('mapEffort (coarse level → route rung)', () => {
     assert.equal(mapEffort('high', ['off', 'none']), undefined)
     assert.equal(mapEffort('medium', []), undefined)
   })
+
+  test('none picks the advertised reasoning-off rung', () => {
+    assert.equal(mapEffort('none', ['off', 'low', 'medium', 'xhigh']), 'off')
+    assert.equal(mapEffort('none', ['none', 'low', 'high']), 'none')
+    assert.equal(mapEffort('none', ['disabled', 'low']), 'disabled')
+    assert.equal(mapEffort('none', ['OFF', 'low']), 'OFF', 'disable ids are case-insensitive')
+  })
+
+  test('none on a ladder with no off rung degrades to the lowest rung', () => {
+    assert.equal(mapEffort('none', ['low', 'medium', 'high']), 'low')
+    assert.equal(mapEffort('none', ['xhigh']), 'xhigh')
+    assert.equal(mapEffort('none', []), undefined, 'an empty ladder has no rung at all')
+  })
 })
 
 describe('resolveEffort (route ladder lookup)', () => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-commands",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "MIT",
   "description": "pi-style prompt templates for dsh: .agents/prompts markdown templates dynamically registered as slash commands, compatible with pi's prompt template format.",
   "author": "American Jeff <jeff@americanjeff.com>",
@@ -27,6 +27,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json",
     "./lib/template.js": "./lib/template.js",
     "./lib/effort.js": "./lib/effort.js"
@@ -34,6 +35,7 @@
   "files": [
     "index.js",
     "lib",
+    "locale/*.json",
     "dsh.cordis.yml",
     "README.md",
     "CHANGELOG.md"
@@ -53,6 +55,6 @@
     "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-llm": "alpha"
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.1"
   }
 }
