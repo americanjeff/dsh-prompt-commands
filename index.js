@@ -114,12 +114,18 @@ export function apply(ctx, config = {}) {
 
       let run
       try {
-        run = await subagents.start('spawn', {
-          prompt: [{ type: 'text', text }],
-          parent: agent,
-          signal,
+        run = await subagents.startActivation({
+          provider: 'spawn',
           label: labelFor(template.name, rawInput),
-          ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
+          signal,
+          // The plugin delivers its own localized notices; 'parent' would
+          // make the harness inject a stock settlement notice on top of them.
+          delivery: 'caller',
+          request: {
+            prompt: [{ type: 'text', text }],
+            parent: agent,
+            ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
+          },
         })
       } catch (error) {
         return { kind: 'error', text: str.spawnFailed(template.name, messageOf(error)) }
@@ -137,7 +143,10 @@ export function apply(ctx, config = {}) {
         .then((result) => deliverResultNotice(str, agent, template.name, result))
         .catch((error) => deliverNotice(agent, str.failedNotice(template.name, messageOf(error)), str.failSummary(template.name, str.errorWord)))
         .finally(() => {
-          try { run.dispose?.() } catch { /* best-effort release */ }
+          // Best-effort release: a naturally settled activation releases
+          // itself, so this is normally a no-op; a teardown failure must not
+          // surface as an unhandled rejection.
+          Promise.resolve(run.dispose?.()).catch(() => {})
         })
 
       return { kind: 'success', text: str.started(appliedEffort) }

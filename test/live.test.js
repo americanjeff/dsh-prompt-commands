@@ -315,8 +315,8 @@ describe('subagent effort (handler spawn)', () => {
 
   /**
    * Register one `task` template, invoke its handler with a fake subagents
-   * service, and return the recorded spawn request(s), logged warnings, and
-   * the handler outcome.
+   * service, and return the recorded startActivation spec(s), logged
+   * warnings, and the handler outcome.
    */
   const invoke = async (config = {}, frontmatter = '', { route = SESSION_ROUTE, llmOverride, agent } = {}) => {
     await rm(prompts, { recursive: true, force: true })
@@ -329,11 +329,12 @@ describe('subagent effort (handler spawn)', () => {
     const ctx = makeCtx(commands, {
       llm: llmOverride ?? llmCatalog(route),
       subagents: {
-        start: async (_kind, req) => {
-          calls.push(req)
+        startActivation: async (spec) => {
+          calls.push(spec)
           return {
+            childId: 'child-1',
             result: Promise.resolve({ output: [{ type: 'text', text: 'done' }], stopReason: 'completed' }),
-            dispose: () => {},
+            dispose: async () => {},
           }
         },
       },
@@ -355,21 +356,35 @@ describe('subagent effort (handler spawn)', () => {
   test('frontmatter effort maps onto the session route ladder', async () => {
     const { calls, outcome } = await invoke({}, 'execution: subagent\neffort: high')
     assert.equal(calls.length, 1)
-    assert.deepEqual(calls[0].agentOptions, { reasoningEffort: 'xhigh' }, 'high → highest rung of off/low/medium/xhigh')
+    assert.deepEqual(calls[0].request.agentOptions, { reasoningEffort: 'xhigh' }, 'high → highest rung of off/low/medium/xhigh')
     assert.equal(outcome.kind, 'success')
     assert.match(outcome.text, /effort xhigh/)
   })
 
+  test('the spawn spec targets the spawn provider with caller delivery', async () => {
+    const { calls } = await invoke({}, 'execution: subagent')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].provider, 'spawn')
+    assert.equal(calls[0].delivery, 'caller', 'the plugin delivers its own localized notices')
+    assert.equal(calls[0].label, 'task')
+    assert.ok(calls[0].signal instanceof AbortSignal)
+    assert.deepEqual(calls[0].request.prompt, [{ type: 'text', text: 'Do it.' }])
+    assert.equal(calls[0].request.parent.id, 'test-agent')
+    assert.equal(calls[0].request.agentOptions, undefined, 'no route or effort: no agent options')
+    assert.equal(calls[0].request.label, undefined, 'label lives on the spec, not the request')
+    assert.equal(calls[0].request.signal, undefined, 'signal lives on the spec, not the request')
+  })
+
   test('low and medium land on the lowest and middle rungs', async () => {
     const low = await invoke({}, 'execution: subagent\neffort: low')
-    assert.deepEqual(low.calls[0].agentOptions, { reasoningEffort: 'low' })
+    assert.deepEqual(low.calls[0].request.agentOptions, { reasoningEffort: 'low' })
     const mid = await invoke({}, 'execution: subagent\neffort: medium')
-    assert.deepEqual(mid.calls[0].agentOptions, { reasoningEffort: 'medium' })
+    assert.deepEqual(mid.calls[0].request.agentOptions, { reasoningEffort: 'medium' })
   })
 
   test('effort none maps to the route off rung', async () => {
     const { calls, outcome } = await invoke({}, 'execution: subagent\neffort: none')
-    assert.deepEqual(calls[0].agentOptions, { reasoningEffort: 'off' })
+    assert.deepEqual(calls[0].request.agentOptions, { reasoningEffort: 'off' })
     assert.match(outcome.text, /effort off/)
   })
 
@@ -377,14 +392,14 @@ describe('subagent effort (handler spawn)', () => {
     const { calls, outcome } = await invoke({}, 'execution: subagent\neffort: none', {
       llmOverride: { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }) },
     })
-    assert.deepEqual(calls[0].agentOptions, { reasoningEffort: 'low' })
+    assert.deepEqual(calls[0].request.agentOptions, { reasoningEffort: 'low' })
     assert.match(outcome.text, /effort low/)
   })
 
   test('no effort declared: the config route goes through unmodified', async () => {
     const { calls } = await invoke({ subagent: { provider: 'llama-swap', model: 'qwen3.8-27b', maxTokens: 4096 } },
       'execution: subagent')
-    assert.deepEqual(calls[0].agentOptions, { provider: 'llama-swap', model: 'qwen3.8-27b', maxTokens: 4096 })
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'llama-swap', model: 'qwen3.8-27b', maxTokens: 4096 })
   })
 
   test('config effort applies on the config route; frontmatter wins over config', async () => {
@@ -394,14 +409,14 @@ describe('subagent effort (handler spawn)', () => {
       'execution: subagent',
       { route: other },
     )
-    assert.deepEqual(fromConfig.calls[0].agentOptions, { provider: 'other', model: 'm2', reasoningEffort: 'low' })
+    assert.deepEqual(fromConfig.calls[0].request.agentOptions, { provider: 'other', model: 'm2', reasoningEffort: 'low' })
 
     const overridden = await invoke(
       { subagent: { provider: 'other', model: 'm2', effort: 'low' } },
       'execution: subagent\neffort: high',
       { route: other },
     )
-    assert.deepEqual(overridden.calls[0].agentOptions, { provider: 'other', model: 'm2', reasoningEffort: 'xhigh' })
+    assert.deepEqual(overridden.calls[0].request.agentOptions, { provider: 'other', model: 'm2', reasoningEffort: 'xhigh' })
   })
 
   test('before the first request: creation options supply the route', async () => {
@@ -413,7 +428,7 @@ describe('subagent effort (handler spawn)', () => {
       followup() {},
     }
     const { calls } = await invoke({}, 'execution: subagent\neffort: high', { agent })
-    assert.deepEqual(calls[0].agentOptions, { reasoningEffort: 'xhigh' })
+    assert.deepEqual(calls[0].request.agentOptions, { reasoningEffort: 'xhigh' })
   })
 
   test('unresolvable route: effort dropped with a warning, child still spawned', async () => {
@@ -423,7 +438,7 @@ describe('subagent effort (handler spawn)', () => {
     })
     assert.equal(calls.length, 1)
     assert.ok(warnings.some((w) => w.includes('/task') && w.includes('high') && w.includes('not applied')), 'warned about the dropped effort')
-    assert.equal(calls[0].agentOptions, undefined, 'spawned without agent options')
+    assert.equal(calls[0].request.agentOptions, undefined, 'spawned without agent options')
     assert.equal(outcome.kind, 'success')
     assert.doesNotMatch(outcome.text, /effort/)
   })
@@ -433,7 +448,7 @@ describe('subagent effort (handler spawn)', () => {
       llmOverride: { resolveModelInfo: async () => ({}) },
     })
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].agentOptions, undefined)
+    assert.equal(calls[0].request.agentOptions, undefined)
     assert.ok(warnings.some((w) => w.includes('not applied')))
   })
 

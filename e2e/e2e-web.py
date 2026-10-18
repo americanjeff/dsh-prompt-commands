@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Live e2e for dsh-prompt-commands against a scratch web profile.
 
-Verified against dsh 0.2.0-rc.1.
+Verified against dsh 0.2.1-rc.2 (the 0.2.1 onboarding dialog dismisses with
+"Close" instead of 0.2.0's "Configure later").
 
 What it does, end to end:
   1. builds a scratch git project with `.agents/prompts/{hello.md,
@@ -189,9 +190,11 @@ def seed_workspace():
 
 
 def dismiss_onboarding(page):
+    # The 0.2.1 "Get started" dialog dismisses with "Close" (0.2.0's
+    # "Configure later" is gone); older hosts may still show their own labels.
     for _ in range(4):
         clicked = None
-        for label in ["Continue", "Configure later", "Later", "Skip"]:
+        for label in ["Continue", "Configure later", "Later", "Skip", "Close"]:
             b = page.get_by_role("button", name=label)
             if b.count() > 0 and b.first.is_visible():
                 try:

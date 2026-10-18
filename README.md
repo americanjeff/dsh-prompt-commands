@@ -15,6 +15,9 @@ dsh --profile <name> plugin add dsh-prompt-commands
 
 Working from a checkout instead: `dsh --profile <name> plugin add link:$PWD`.
 
+Requires the dsh 0.2.1 host line (the subagent seam's `startActivation`
+contract); on 0.2.0 hosts `execution: subagent` templates fail.
+
 Row config (all optional):
 
 ```yaml
