@@ -121,11 +121,11 @@ export function apply(ctx, config = {}) {
           // The plugin delivers its own localized notices; 'parent' would
           // make the harness inject a stock settlement notice on top of them.
           delivery: 'caller',
-          request: {
-            prompt: [{ type: 'text', text }],
-            parent: agent,
-            ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
-          },
+          // dsh 0.2.2 flattened the activation spec: task options live on the
+          // spec itself (0.2.1 nested them under `request`).
+          prompt: [{ type: 'text', text }],
+          parent: agent,
+          ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
         })
       } catch (error) {
         return { kind: 'error', text: str.spawnFailed(template.name, messageOf(error)) }
