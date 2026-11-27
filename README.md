@@ -1,4 +1,7 @@
-# dsh-prompt-commands
+[![npm version](https://img.shields.io/npm/v/dsh-prompt-commands)](https://www.npmjs.com/package/dsh-prompt-commands)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+# <img src="assets/icon-inline.svg" height="24" alt="dsh-prompt-commands icon"> dsh-prompt-commands
 
 pi-style prompt templates for dsh: markdown templates **registered as slash
 commands** — one command per template file, named after the file. New, edited,
