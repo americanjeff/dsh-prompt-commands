@@ -131,11 +131,11 @@ rung is `off` spawns at `off`.
   session-side effort switch — so an `inline` template that declares `effort`
   logs a warning and runs at the session's effort.
 
-## Behavior
+## Example prompts
 
-`/plan prompt templates` → the command row settles → the template's body with
-its arguments substituted becomes the session's next user prompt (`inline`),
-or a background subagent task with a result notice (`subagent`).
+ - [`/crit`](./examples/crit.md) review the files or changes with [Crit](https://github.com/tomasz-tomczyk/crit).
+ - [`/init`](./examples/init.md) init current directory with [jj](https://github.com/jj-vcs/jj).
+ - [`/commit`](./examples/commit.md) commit the working copy.
 
 ## Tests
 
