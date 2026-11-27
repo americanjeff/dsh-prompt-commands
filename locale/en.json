@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "Prompt commands",
-    "description": "pi-style prompt templates for dsh: .agents/prompts markdown templates dynamically registered as slash commands, compatible with pi's prompt template format."
+    "description": "pi-style prompt templates for dsh: .agents/prompts markdown templates dynamically registered as slash commands, compatible with pi's prompt template format.",
+    "detail": "docs/DETAIL.md"
   }
 }

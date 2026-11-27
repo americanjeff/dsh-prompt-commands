@@ -39,6 +39,7 @@
     "index.js",
     "icon.svg",
     "assets/icon-inline.svg",
+    "docs",
     "lib",
     "dist",
     "locale/*.json",
