@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-commands",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "description": "pi-style prompt templates for dsh: .agents/prompts markdown templates dynamically registered as slash commands, compatible with pi's prompt template format.",
   "author": "American Jeff <jeff@americanjeff.com>",
