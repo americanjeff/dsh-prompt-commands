@@ -28,6 +28,7 @@
   "exports": {
     ".": "./index.js",
     "./client": "./dist/dsh/client.js",
+    "./icon": "./icon.svg",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json",
     "./lib/template.js": "./lib/template.js",
