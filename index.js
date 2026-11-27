@@ -11,6 +11,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { combineCommandOutput, runTemplateCommand } from './lib/command.js'
+import { Config } from './lib/config.js'
 import { EFFORT_LEVELS, resolveEffort } from './lib/effort.js'
 import {
   diffRegistrations,
@@ -23,28 +24,45 @@ import {
 
 export const name = 'prompt-commands'
 
+/** The settings schema (lib/config.js): the loader's write gate for the
+ * entry's `config:` block and the served surface the client card edits. */
+export { Config }
+
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ promptDirs?: string[], subagent?: { provider?: string, model?: string, maxTokens?: number, effort?: 'none' | 'low' | 'medium' | 'high' }, lang?: 'en' | 'zh' }} [config]
- *   - `promptDirs`: extra template directories (files only, non-recursive),
- *     scanned before the user root so they win name collisions.
- *   - `subagent`: default model route and coarse effort for
- *     `execution: subagent` templates; absent fields inherit the session's
- *     route / apply no effort (frontmatter `effort` wins over the config).
- *   - `lang`: language of the plugin's own user-facing copy (fallback
- *     description, result texts, notices): `'en'` (default) or `'zh'`.
- *     Template content is user-written and unaffected.
+ * @param {Record<string, unknown>} [config] - the entry's `config:` block.
+ *   In production every field is a volatile reference read with `.get()`
+ *   (the loader commits card saves in place and emits
+ *   `loader/volatile-update`); plain objects (the tests) pass through.
+ *   Fields: `promptDirs` (string[]), `subagentProvider`, `subagentModel`,
+ *   `subagentMaxTokens`, `subagentEffort`, `lang` — see lib/config.js.
  */
 export function apply(ctx, config = {}) {
-  validateConfig(config)
-  const str = STRINGS[config.lang ?? 'en']
+  /**
+   * Read one config field through its volatile reference, or plain when the
+   * caller passed literal values.
+   * @param {string} field
+   * @returns {unknown}
+   */
+  const read = (field) => {
+    const value = config[field]
+    return value !== null && typeof value === 'object' && typeof value.get === 'function' ? value.get() : value
+  }
+  // Production configs carry refs: the schema (Config) is the write gate
+  // there, and validateConfig is for the plain literal path.
+  const hasRefs = Object.values(config).some((value) => value !== null && typeof value === 'object' && typeof value.get === 'function')
+  if (!hasRefs) validateConfig(config)
+  // The plugin's own copy follows the live `lang` — a card save commits the
+  // field in place, so the next invocation speaks the new language.
+  const strings = () => STRINGS[read('lang') ?? 'en']
 
   const agentsHome = resolve(process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'))
   const userRoot = join(agentsHome, 'prompts')
-  const customRoots = (config.promptDirs ?? []).map((dir) => resolve(dir))
-  // `effort` is a coarse level the handler maps onto a route's ladder at
-  // spawn — it is never forwarded as a child agent option itself.
-  const { effort: configEffort, ...subagentRoute } = config.subagent ?? {}
+  /** The extra template roots the live `promptDirs` names, in config order. */
+  const currentRoots = () => {
+    const dirs = read('promptDirs')
+    return (Array.isArray(dirs) ? dirs : []).map((dir) => resolve(dir))
+  }
 
   /**
    * Resolve one coarse effort level to the concrete effort id of the route
@@ -79,6 +97,7 @@ export function apply(ctx, config = {}) {
    * re-read at each invocation for live edits.
    */
   const makeHandler = (template) => async ({ agent, rawInput, signal }) => {
+    const str = strings()
     let current
     try {
       current = await loadTemplateFile(template.filePath, { source: template.source })
@@ -148,10 +167,18 @@ export function apply(ctx, config = {}) {
       // Coarse effort: template frontmatter wins over the row config
       // default. Mapped onto the resolved child route's advertised ladder;
       // an unresolvable route (or one with no usable rung) drops the effort
-      // with a warning and the child runs its route default.
-      const coarseEffort = current.effort ?? configEffort
-      let agentOptions = subagentRoute
+      // with a warning and the child runs its route default. The route and
+      // effort read the live config (a card save commits without re-apply).
+      const subagentRoute = {}
+      const provider = read('subagentProvider')
+      const model = read('subagentModel')
+      const maxTokens = read('subagentMaxTokens')
+      if (typeof provider === 'string' && provider.length > 0) subagentRoute.provider = provider
+      if (typeof model === 'string' && model.length > 0) subagentRoute.model = model
+      if (typeof maxTokens === 'number' && Number.isSafeInteger(maxTokens) && maxTokens > 0) subagentRoute.maxTokens = maxTokens
+      const coarseEffort = current.effort ?? read('subagentEffort')
       let appliedEffort
+      let agentOptions = subagentRoute
       if (coarseEffort !== undefined) {
         appliedEffort = await resolveTemplateEffort(agent, coarseEffort, subagentRoute, signal)
         if (appliedEffort === undefined) {
@@ -249,7 +276,7 @@ export function apply(ctx, config = {}) {
       try {
         const disposer = register({
           name: template.name,
-          description: commandDescription(str, template),
+          description: commandDescription(strings(), template),
           ...(template.argumentHint === undefined ? {} : { input: { hint: template.argumentHint } }),
           handler: makeHandler(template),
         })
@@ -432,16 +459,41 @@ export function apply(ctx, config = {}) {
   }
 
   ctx.inject(['commands'], (scope) => {
-    // Global layer: explicit config roots (in listed order), then the user
-    // root. Same-layer name collisions: the first registration holds the
-    // name and the rest are tracked as shadowed; when a holder unregisters
-    // (its file is deleted), the peers re-sync and a shadowed root claims
-    // the freed name.
-    const globalRoots = []
-    for (const [root, source] of [...customRoots.map((dir) => [dir, 'custom']), [userRoot, 'user']]) {
-      globalRoots.push(watchRoot(root, source, (definition) => scope.commands.register(definition),
-        (name) => { for (const peer of globalRoots) peer.nudge(name) }))
+    // Global layer: the live `promptDirs` roots (in config order), then the
+    // user root. Custom roots register FIRST so they win same-layer name
+    // collisions against the user root. Same-layer name collisions: the
+    // first registration holds the name and the rest are tracked as
+    // shadowed; when a holder unregisters (its file is deleted), the peers
+    // re-sync and a shadowed root claims the freed name.
+    const register = (definition) => scope.commands.register(definition)
+    /** Custom roots currently watched: dir → watchRoot handle. */
+    const customRoots = new Map()
+    let userRootHandle = null
+    const nudgeAll = (name) => {
+      for (const peer of customRoots.values()) peer.nudge(name)
+      userRootHandle?.nudge(name)
     }
+    /** Diff the custom roots against the live `promptDirs`: add new dirs,
+     *  dispose removed ones. Editing an existing dir in place is a no-op —
+     *  the watch root already tracks that directory. */
+    const syncCustomRoots = () => {
+      const wanted = currentRoots()
+      const wantedSet = new Set(wanted)
+      for (const [dir, handle] of [...customRoots]) {
+        if (wantedSet.has(dir)) continue
+        customRoots.delete(dir)
+        try { handle.dispose() } catch { /* already reclaimed */ }
+      }
+      for (const dir of wanted) {
+        if (customRoots.has(dir)) continue
+        customRoots.set(dir, watchRoot(dir, 'custom', register, nudgeAll))
+      }
+    }
+    syncCustomRoots()
+    userRootHandle = watchRoot(userRoot, 'user', register, nudgeAll)
+    // A card save commits `promptDirs` in place (volatile) — re-derive the
+    // custom roots without a re-apply.
+    ctx.on('loader/volatile-update', () => { syncCustomRoots() })
 
     // Per-agent layer: the project `.agents/prompts` next to the session's
     // skills. Registered through `agent.ctx`, so the definitions are
@@ -496,8 +548,12 @@ export function apply(ctx, config = {}) {
     // per-agent roots also unwind at agent disposal, but plugin unload
     // reaches only this effect.
     scope.effect(() => () => {
-      for (const handle of globalRoots) {
+      for (const handle of customRoots.values()) {
         try { handle.dispose() } catch { /* already reclaimed */ }
+      }
+      customRoots.clear()
+      if (userRootHandle !== null) {
+        try { userRootHandle.dispose() } catch { /* already reclaimed */ }
       }
       for (const state of agentRoots.values()) {
         state.disposed = true
@@ -642,36 +698,34 @@ function messageOf(err) {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** Validate the row config, failing loud at boot (dsh plugin convention). */
+/** Validate the plain (test-path) row config, failing loud at boot (dsh
+ *  plugin convention). In production the Config schema is the write gate —
+ *  apply() skips this when the config carries volatile references. */
 function validateConfig(config) {
-  if (config.lang !== undefined && config.lang !== 'en' && config.lang !== 'zh') {
-    throw new TypeError('prompt-commands config.lang must be "en" or "zh"')
+  const known = new Set(['promptDirs', 'subagentProvider', 'subagentModel', 'subagentMaxTokens', 'subagentEffort', 'lang'])
+  for (const key of Object.keys(config)) {
+    if (!known.has(key)) {
+      throw new TypeError(`prompt-commands config has unknown field "${key}" (expected promptDirs, subagentProvider, subagentModel, subagentMaxTokens, subagentEffort, or lang)`)
+    }
   }
   if (config.promptDirs !== undefined) {
     if (!Array.isArray(config.promptDirs) || config.promptDirs.some((dir) => typeof dir !== 'string' || dir.length === 0)) {
       throw new TypeError('prompt-commands config.promptDirs must be an array of non-empty directory paths')
     }
   }
-  if (config.subagent !== undefined) {
-    if (typeof config.subagent !== 'object' || config.subagent === null || Array.isArray(config.subagent)) {
-      throw new TypeError('prompt-commands config.subagent must be an object')
+  for (const key of ['subagentProvider', 'subagentModel']) {
+    const value = config[key]
+    if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
+      throw new TypeError(`prompt-commands config.${key} must be a non-empty string`)
     }
-    for (const [key, value] of Object.entries(config.subagent)) {
-      if (key === 'maxTokens') {
-        if (!Number.isSafeInteger(value) || value <= 0) {
-          throw new TypeError('prompt-commands config.subagent.maxTokens must be a positive safe integer')
-        }
-      } else if (key === 'provider' || key === 'model') {
-        if (typeof value !== 'string' || value.length === 0) {
-          throw new TypeError(`prompt-commands config.subagent.${key} must be a non-empty string`)
-        }
-      } else if (key === 'effort') {
-        if (typeof value !== 'string' || !EFFORT_LEVELS.includes(value)) {
-          throw new TypeError('prompt-commands config.subagent.effort must be "none", "low", "medium", or "high"')
-        }
-      } else {
-        throw new TypeError(`prompt-commands config.subagent has unknown field "${key}" (expected provider, model, maxTokens, or effort)`)
-      }
-    }
+  }
+  if (config.subagentMaxTokens !== undefined && (!Number.isSafeInteger(config.subagentMaxTokens) || config.subagentMaxTokens <= 0)) {
+    throw new TypeError('prompt-commands config.subagentMaxTokens must be a positive safe integer')
+  }
+  if (config.subagentEffort !== undefined && (typeof config.subagentEffort !== 'string' || !EFFORT_LEVELS.includes(config.subagentEffort))) {
+    throw new TypeError('prompt-commands config.subagentEffort must be "none", "low", "medium", or "high"')
+  }
+  if (config.lang !== undefined && config.lang !== 'en' && config.lang !== 'zh') {
+    throw new TypeError('prompt-commands config.lang must be "en" or "zh"')
   }
 }

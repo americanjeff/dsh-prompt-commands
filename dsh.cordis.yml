@@ -1,25 +1,26 @@
 # dsh-prompt-commands bundle patch layer: mounts the prompt-commands
 # plugin row.
 #
-# The plugin discovers pi-style prompt templates and dynamically registers
-# them as slash commands. Default roots (mirroring the skill roots): the
-# session project's `.agents/prompts` (per agent, shadowing globals) and
-# `~/.agents/prompts` (global).
+# Dual-face plugin: the node half (main) discovers pi-style prompt templates
+# and dynamically registers them as slash commands; the browser half
+# (dsh.client + the ./client export) renders the settings card on the
+# plugin's bundle page in dsh's Settings.
 #
-# The row ships with no config. Add a `config` block here (or override it in
-# a profile patch layer, e.g. `- id: prompt-commands` + `config:`) for
-# deployment-specific values:
+# Default template roots (mirroring the skill roots): the session project's
+# `.agents/prompts` (per agent, shadowing globals) and `~/.agents/prompts`
+# (global). The row config is edited on the settings card (it commits live,
+# no restart) or, equivalently, as this entry's `config:` block — flat keys:
 #
-#   promptDirs: [dir, ...]   — extra template dirs (files only, non-recursive);
-#                              scanned before the user root (they win name collisions).
-#   subagent:                — default model route for templates declared
-#     provider: str          —   `execution: subagent`; absent fields inherit
-#     model: str             —   the session's route.
-#     maxTokens: int
-#     effort: str            —   coarse effort default (none | low | medium | high).
-#   lang: str                — language of the plugin's own user-facing copy
-#                              (en | zh; default en). Template content is
-#                              user-written and unaffected.
+#   promptDirs: [dir, ...]     — extra template dirs (non-recursive, .md files
+#                                only); scanned before the user root (they win
+#                                name collisions).
+#   subagentProvider: str      — route fields for `execution: subagent`
+#   subagentModel: str         —   templates; absent fields inherit the
+#   subagentMaxTokens: int     —   session's route / the child's effort default.
+#   subagentEffort: str        — coarse effort default (none | low | medium | high).
+#   lang: str                  — language of the plugin's own user-facing copy
+#                                (en | zh; default en). Template content is
+#                                user-written and unaffected.
 - insert:
   - id: prompt-commands
     name: 'dsh-prompt-commands'

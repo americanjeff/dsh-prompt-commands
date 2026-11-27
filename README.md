@@ -16,18 +16,15 @@ Changelog: [CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/america
 dsh --profile <name> plugin add dsh-prompt-commands
 ```
 
-Row config (all optional):
-
-```yaml
-config:
-  promptDirs: [dir, ...]      # extra template dirs (non-recursive, .md files only)
-  subagent:                   # defaults for `execution: subagent` templates
-    provider: llama-swap      #   route fields left absent inherit the session's route
-    model: qwen3.8-27b
-    maxTokens: 8192
-    effort: high              #   coarse effort default (none | low | medium | high); see `effort`
-  lang: zh                    # optional: en (default) | zh — the plugin's own UI copy
-```
+Row config (all optional) is edited on the plugin's **settings card** —
+dsh's Settings → the plugin's bundle page: extra template directories, the
+subagent route (provider, model, max tokens, effort), and the plugin copy
+language. Every field commits live: a save applies without a restart
+(`promptDirs` re-syncs the watch roots; the route and language are read at
+the next invocation). Equivalently, the entry's `config:` block in a profile
+patch layer takes the same flat keys — `promptDirs`, `subagentProvider`,
+`subagentModel`, `subagentMaxTokens`, `subagentEffort`, `lang` (the schema:
+lib/config.js).
 
 `lang` sets the language of the plugin's fixed strings — the fallback
 command description, the "started" result text, and the subagent notices.
@@ -81,8 +78,9 @@ Template body with placeholders:
   as an ordinary user message; the model answers in that session.
 - `subagent` — the expanded template runs in a fresh one-shot subagent. The
   command settles immediately, and a notice reports the outcome when the child
-  settles. The child's model route is the row config `subagent` block when
-  present, otherwise the session's route.
+  settles. The child's model route is the row config `subagentProvider` /
+  `subagentModel` (with `subagentMaxTokens`) when present, otherwise the
+  session's route.
 
 ### `command`
 
@@ -119,9 +117,10 @@ templates never name a concrete id — on a route whose top rung is `xhigh`,
 rung is `off` spawns at `off`.
 
 - **Precedence**: template frontmatter `effort` > row config
-  `subagent.effort` > no effort (the child runs its route's default).
+  `subagentEffort` > no effort (the child runs its route's default).
 - **Route**: the ladder is read from the child's actual route — the config
-  `subagent` route when it names provider/model, otherwise the session's
+  `subagentProvider`/`subagentModel` route when both are present, otherwise
+  the session's
   current route.
 - **Degrades safely**: a route that cannot be resolved drops the effort with
   a logged warning; the child still runs, at its route default. A `none` on a

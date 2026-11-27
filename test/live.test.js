@@ -51,6 +51,7 @@ function makeCommands() {
  */
 function makeCtx(commands, services = {}, { logger = { warn() {} } } = {}) {
   const unloads = []
+  const eventHandlers = new Map()
   const ctx = {
     logger,
     inject(_deps, callback) {
@@ -64,7 +65,15 @@ function makeCtx(commands, services = {}, { logger = { warn() {} } } = {}) {
       callback(scope)
       return Promise.resolve({ dispose: async () => {} })
     },
-    on() {},
+    on(name, handler) {
+      const list = eventHandlers.get(name) ?? []
+      list.push(handler)
+      eventHandlers.set(name, list)
+    },
+    /** Fire one context event (test hook — e.g. loader/volatile-update). */
+    fire(name, payload) {
+      for (const handler of eventHandlers.get(name) ?? []) handler(payload)
+    },
     get: (name) => services[name],
     unload() {
       for (const dispose of [...unloads].reverse()) {
@@ -204,6 +213,30 @@ describe('live discovery (index.js)', () => {
     await settle(700)
     assert.ok(!commands.active.has('delta'), 'watchers are dead after unload')
   })
+
+  test('volatile promptDirs re-syncs the custom roots live', async () => {
+    await resetRoots()
+    let dirs = [customA]
+    const commands = makeCommands()
+    const ctx = makeCtx(commands)
+    // Production passes each volatile field as a `{ get() }` reference.
+    apply(ctx, { promptDirs: { get: () => dirs } })
+    await settle()
+
+    writeFileSync(join(customA, 'refa.md'), template())
+    await settle()
+    assert.ok(commands.active.has('refa'), 'the ref-supplied root registered its template')
+
+    dirs = [customB] // a card save commits the new array into the ref
+    ctx.fire('loader/volatile-update', [['promptDirs']])
+    await settle(900)
+    assert.ok(!commands.active.has('refa'), 'the removed root unregistered its templates')
+
+    writeFileSync(join(customB, 'refb.md'), template())
+    await settle()
+    assert.ok(commands.active.has('refb'), 'the added root registered its template')
+    ctx.unload()
+  })
 })
 
 // ============================================================================
@@ -226,31 +259,33 @@ describe('row config validation (boot)', () => {
     await rm(base, { recursive: true, force: true })
   })
 
-  test('subagent block accepts the coarse effort field', () => {
+  test('subagent route fields accept the coarse effort level', () => {
     const ctx1 = makeCtx(makeCommands())
     assert.doesNotThrow(() => {
-      apply(ctx1, { subagent: { effort: 'low' } })
+      apply(ctx1, { subagentEffort: 'low' })
       ctx1.unload()
     })
     const ctx2 = makeCtx(makeCommands())
     assert.doesNotThrow(() => {
-      apply(ctx2, { subagent: { provider: 'p', model: 'm', maxTokens: 100, effort: 'high' } })
+      apply(ctx2, { subagentProvider: 'p', subagentModel: 'm', subagentMaxTokens: 100, subagentEffort: 'high' })
       ctx2.unload()
     })
     const ctx3 = makeCtx(makeCommands())
     assert.doesNotThrow(() => {
-      apply(ctx3, { subagent: { effort: 'none' } })
+      apply(ctx3, { subagentEffort: 'none' })
       ctx3.unload()
     })
   })
 
-  test('subagent block rejects unknown fields and non-coarse efforts', () => {
-    assert.throws(() => apply(makeCtx(makeCommands()), { subagent: { effort: 'xhigh' } }),
-      (err) => err instanceof TypeError && /effort/.test(err.message))
-    assert.throws(() => apply(makeCtx(makeCommands()), { subagent: { reasoningEffort: 'low' } }),
+  test('unknown fields and non-coarse efforts are rejected', () => {
+    assert.throws(() => apply(makeCtx(makeCommands()), { subagentEffort: 'xhigh' }),
+      (err) => err instanceof TypeError && /effort/iu.test(err.message))
+    assert.throws(() => apply(makeCtx(makeCommands()), { reasoningEffort: 'low' }),
       (err) => err instanceof TypeError && /unknown field/.test(err.message))
-    assert.throws(() => apply(makeCtx(makeCommands()), { subagent: { effort: 1 } }),
-      (err) => err instanceof TypeError && /effort/.test(err.message))
+    assert.throws(() => apply(makeCtx(makeCommands()), { subagentEffort: 1 }),
+      (err) => err instanceof TypeError && /effort/iu.test(err.message))
+    assert.throws(() => apply(makeCtx(makeCommands()), { subagent: {} }),
+      (err) => err instanceof TypeError && /unknown field/.test(err.message))
   })
 
   test('lang accepts en/zh and rejects unknown values', () => {
@@ -396,7 +431,7 @@ describe('subagent effort (handler spawn)', () => {
   })
 
   test('no effort declared: the config route goes through unmodified', async () => {
-    const { calls } = await invoke({ subagent: { provider: 'llama-swap', model: 'qwen3.8-27b', maxTokens: 4096 } },
+    const { calls } = await invoke({ subagentProvider: 'llama-swap', subagentModel: 'qwen3.8-27b', subagentMaxTokens: 4096 },
       'execution: subagent')
     assert.deepEqual(calls[0].agentOptions, { provider: 'llama-swap', model: 'qwen3.8-27b', maxTokens: 4096 })
   })
@@ -404,14 +439,14 @@ describe('subagent effort (handler spawn)', () => {
   test('config effort applies on the config route; frontmatter wins over config', async () => {
     const other = { provider: 'other', model: 'm2' }
     const fromConfig = await invoke(
-      { subagent: { provider: 'other', model: 'm2', effort: 'low' } },
+      { subagentProvider: 'other', subagentModel: 'm2', subagentEffort: 'low' },
       'execution: subagent',
       { route: other },
     )
     assert.deepEqual(fromConfig.calls[0].agentOptions, { provider: 'other', model: 'm2', reasoningEffort: 'low' })
 
     const overridden = await invoke(
-      { subagent: { provider: 'other', model: 'm2', effort: 'low' } },
+      { subagentProvider: 'other', subagentModel: 'm2', subagentEffort: 'low' },
       'execution: subagent\neffort: high',
       { route: other },
     )

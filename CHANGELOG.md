@@ -6,6 +6,7 @@
 - Added: `command-timeout:` frontmatter — bounds the `command` run: a millisecond number, a duration (`30s`/`5m`/`1h`), or `none` (runs until the child exits or the invocation is aborted). Default 10s.
 - Added: `command-background: true` frontmatter — runs the `command` as a session-owned background child: the invocation settles immediately, and when the child exits the folded prompt is delivered as the agent's next user message (a failure arrives as a notice). Background commands default to no timeout; ignored with a warning on `execution: subagent` templates.
 - Changed: the `command` string interpolates the body's argument placeholders (`$1`, `$@`, `$ARGUMENTS`, `${@:N}`); when any is present the arguments are substituted there instead of appended as trailing argv.
+- Added: dual-face plugin — a settings card on the plugin's bundle page in dsh's Settings edits the full row config live (extra template directories, the subagent route, the plugin copy language); every field is a volatile setting, so a save applies without a restart. The config shape flattened accordingly: the `subagent:` block became `subagentProvider` / `subagentModel` / `subagentMaxTokens` / `subagentEffort` (no profile shipped the nested block).
 
 ## [0.3.0] - 2026-11-13
 
