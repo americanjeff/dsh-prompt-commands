@@ -10,6 +10,7 @@ import { statSync, watch } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { combineCommandOutput, runTemplateCommand } from './lib/command.js'
 import { EFFORT_LEVELS, resolveEffort } from './lib/effort.js'
 import {
   diffRegistrations,
@@ -88,7 +89,55 @@ export function apply(ctx, config = {}) {
       return { kind: 'error', text: str.fileGone(template.name, template.filePath) }
     }
 
-    const text = expandTemplate(current, rawInput)
+    const argsString = rawInput.replace(/^\s+/u, '')
+    let text = expandTemplate(current, rawInput)
+
+    // `command:` frontmatter: run the declared command with the invocation's
+    // arguments as trailing argv and fold its stdout into the expanded
+    // prompt ($OUTPUT / ${OUTPUT} placeholder, default body-then-output).
+    // Runs for both delivery modes — it only shapes the prompt text. It runs
+    // in the session's cwd (the same cwd project-root discovery uses).
+    if (current.command !== undefined) {
+      if (current.commandBackground && current.execution === 'subagent') {
+        ctx.logger.warn(`prompt-commands: /${template.name} declares command-background with execution: subagent; the flag is ignored there — the command runs synchronously before the spawn`)
+      } else if (current.commandBackground) {
+        // Session-owned background child: not bound to the UI request's
+        // abort signal, no start notice, the model is not involved. When
+        // the child exits, the folded prompt is delivered as the agent's
+        // next user message; a failure arrives as a non-waking notice.
+        // With no command-timeout, it runs until it exits.
+        warnInertInlineEffort(ctx.logger, current, template.name)
+        void runTemplateCommand(current.command, parseCommandArgs(argsString), {
+          cwd: agent.session?.header?.cwd ?? process.cwd(),
+          timeoutMs: current.commandTimeout !== undefined ? current.commandTimeout : null,
+        })
+          .then((output) => {
+            try {
+              agent.followup(createUserMessage({
+                content: [{ type: 'text', text: combineCommandOutput(text, output) }],
+                source: { kind: 'user' },
+              }))
+            } catch {
+              /* the session is gone; the output has nowhere to go */
+            }
+          })
+          .catch((error) => {
+            deliverNotice(agent, str.commandFailedNotice(template.name, messageOf(error)), str.failSummary(template.name, str.errorWord))
+          })
+        return { kind: 'success', text: str.commandStarted() }
+      }
+      let output
+      try {
+        output = await runTemplateCommand(current.command, parseCommandArgs(argsString), {
+          cwd: agent.session?.header?.cwd ?? process.cwd(),
+          signal,
+          ...(current.commandTimeout === undefined ? {} : { timeoutMs: current.commandTimeout }),
+        })
+      } catch (error) {
+        return { kind: 'error', text: str.commandFailed(template.name, messageOf(error)) }
+      }
+      text = combineCommandOutput(text, output)
+    }
 
     if (current.execution === 'subagent') {
       const subagents = ctx.get('subagents')
@@ -155,12 +204,7 @@ export function apply(ctx, config = {}) {
     // Default (inline): the expanded prompt is an ordinary user message on
     // the invoking agent — pi's semantics (the model answers in this
     // session). Queues behind a running turn, like a normal user submit.
-    if (current.effort !== undefined) {
-      // A session's reasoning effort is durable state (its request header),
-      // not a per-turn dial — there is no temporary session-side
-      // application, so the declared level is ignored here.
-      ctx.logger.warn(`prompt-commands: /${template.name} declares effort ${current.effort} but runs inline; session effort is durable state, so the level is ignored (use execution: subagent to apply it)`)
-    }
+    warnInertInlineEffort(ctx.logger, current, template.name)
     try {
       agent.followup(createUserMessage({
         content: [{ type: 'text', text }],
@@ -475,10 +519,13 @@ const STRINGS = {
       : 'Started — result will arrive as a context notice.',
     fileInvalid: (name, message) => `/${name}: the template file is now invalid: ${message}`,
     fileGone: (name, path) => `/${name}: the template file no longer exists: ${path}`,
+    commandFailed: (name, message) => `/${name}: the template's command failed: ${message}`,
     noSubagents: (name) => `/${name} is declared with execution: subagent, but this deployment composes no subagents service`,
     spawnFailed: (name, message) => `Failed to start the ${name} subagent: ${message}`,
     followupFailed: (message) => `Failed to send the expanded prompt: ${message}`,
     startedNotice: (name, effort) => `A /${name} subagent has just started${effort !== undefined ? ` (effort: ${effort})` : ''}. A follow-up notice will report the outcome; do not start another /${name} for the same request in the meantime.`,
+    commandStarted: () => 'Started in the background — the output will arrive as a prompt when it finishes.',
+    commandFailedNotice: (name, message) => `The /${name} background command failed: ${message}`,
     failedNotice: (name, message) => `A /${name} subagent failed: ${message}`,
     notCompleted: (name, stopReason, diagnostic, output) => `A /${name} subagent did NOT complete — it ended with “${stopReason}”${diagnostic ? ` (${diagnostic})` : ''}${output ? `: ${output}` : ''}. Retry /${name} if the task should have succeeded.`,
     finished: (name, output) => `A /${name} subagent just finished. Its final output: ${output}. Do not re-report this result unless asked.`,
@@ -494,10 +541,13 @@ const STRINGS = {
       : '已启动——结果将以上下文通知送达。',
     fileInvalid: (name, message) => `/${name}：模板文件当前无效：${message}`,
     fileGone: (name, path) => `/${name}：模板文件已不存在：${path}`,
+    commandFailed: (name, message) => `/${name}：模板命令运行失败：${message}`,
     noSubagents: (name) => `/${name} 声明了 execution: subagent，但当前部署未组合 subagents 服务`,
     spawnFailed: (name, message) => `无法启动 ${name} 子代理：${message}`,
     followupFailed: (message) => `发送展开后的提示失败：${message}`,
     startedNotice: (name, effort) => `/${name} 子代理刚刚启动${effort !== undefined ? `（推理强度：${effort}）` : ''}。后续通知将报告结果；在此期间请勿为同一请求再次启动 /${name}。`,
+    commandStarted: () => '已在后台启动——命令输出将在结束时作为提示送达。',
+    commandFailedNotice: (name, message) => `/${name} 后台命令运行失败：${message}`,
     failedNotice: (name, message) => `/${name} 子代理运行失败：${message}`,
     notCompleted: (name, stopReason, diagnostic, output) => `/${name} 子代理未正常完成——它以「${stopReason}」结束${diagnostic ? `（${diagnostic}）` : ''}${output ? `：${output}` : ''}。如果任务本应成功，请重试 /${name}。`,
     finished: (name, output) => `/${name} 子代理刚刚完成。最终输出：${output}。除非被要求，请勿再次汇报此结果。`,
@@ -505,6 +555,22 @@ const STRINGS = {
     failSummary: (name, reason) => `${name} 失败 — ${reason}`,
     doneSummary: (name, firstLine) => `${name} 完成 — ${firstLine}`,
   },
+}
+
+/**
+ * A session's reasoning effort is durable state (its request header), not a
+ * per-turn dial — there is no temporary session-side application, so a
+ * template that declares `effort` while running inline (including a
+ * background command delivered inline) logs a warning and runs at the
+ * session's effort.
+ * @param {{ warn(message: string): void }} logger
+ * @param {{ effort?: string }} current
+ * @param {string} name
+ */
+function warnInertInlineEffort(logger, current, name) {
+  if (current.effort !== undefined) {
+    logger.warn(`prompt-commands: /${name} declares effort ${current.effort} but runs inline; session effort is durable state, so the level is ignored (use execution: subagent to apply it)`)
+  }
 }
 
 /**

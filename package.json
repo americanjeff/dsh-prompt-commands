@@ -21,6 +21,7 @@
     "templates"
   ],
   "type": "module",
+  "icon": "./icon.svg",
   "engines": {
     "node": ">=22"
   },
@@ -30,10 +31,12 @@
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json",
     "./lib/template.js": "./lib/template.js",
+    "./lib/command.js": "./lib/command.js",
     "./lib/effort.js": "./lib/effort.js"
   },
   "files": [
     "index.js",
+    "icon.svg",
     "lib",
     "locale/*.json",
     "dsh.cordis.yml",

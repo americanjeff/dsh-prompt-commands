@@ -318,10 +318,10 @@ describe('subagent effort (handler spawn)', () => {
    * service, and return the recorded startActivation spec(s), logged
    * warnings, and the handler outcome.
    */
-  const invoke = async (config = {}, frontmatter = '', { route = SESSION_ROUTE, llmOverride, agent } = {}) => {
+  const invoke = async (config = {}, frontmatter = '', { route = SESSION_ROUTE, llmOverride, agent, rawInput = '', body = 'Do it.' } = {}) => {
     await rm(prompts, { recursive: true, force: true })
     await mkdir(prompts)
-    writeFileSync(join(prompts, 'task.md'), `---\ndescription: T\n${frontmatter}\n---\nDo it.\n`)
+    writeFileSync(join(prompts, 'task.md'), `---\ndescription: T\n${frontmatter}\n---\n${body}\n`)
 
     const calls = []
     const warnings = []
@@ -346,7 +346,7 @@ describe('subagent effort (handler spawn)', () => {
     assert.ok(record, 'task registered')
     const outcome = await record.definition.handler({
       agent: agent ?? agentWithHeader(route),
-      rawInput: '',
+      rawInput,
       signal: new AbortController().signal,
     })
     ctx.unload()
@@ -469,5 +469,205 @@ describe('subagent effort (handler spawn)', () => {
     assert.ok(warnings.some((w) => w.includes('/task') && w.includes('high') && w.includes('inline')))
     assert.equal(outcome.kind, 'success')
     assert.equal(outcome.text, undefined)
+  })
+})
+
+// ============================================================================
+// command: frontmatter (handler level — stdout folds into the prompt)
+// ============================================================================
+
+describe('command frontmatter (handler delivery)', () => {
+  let base
+  let prompts
+  let previousAgentsHome
+
+  /** A command that echoes its trailing argv as `out:<args comma-joined>`. */
+  const ECHO_ARGS = `${process.execPath} -e 'console.log("out:" + process.argv.slice(1).join(","))'`
+
+  before(async () => {
+    base = await mkdtemp(join(tmpdir(), 'dsh-prompt-command-handler-test-'))
+    prompts = join(base, 'prompts')
+    await mkdir(prompts, { recursive: true })
+    previousAgentsHome = process.env.DSH_AGENTS_HOME
+    process.env.DSH_AGENTS_HOME = join(base, 'agents')
+  })
+
+  after(async () => {
+    if (previousAgentsHome === undefined) delete process.env.DSH_AGENTS_HOME
+    else process.env.DSH_AGENTS_HOME = previousAgentsHome
+    await rm(base, { recursive: true, force: true })
+  })
+
+  /** Inline-delivery agent that records the followup user message. */
+  const inlineAgent = () => {
+    const sent = []
+    return {
+      agent: {
+        id: 'test-agent',
+        options: {},
+        session: {},
+        inject() {},
+        followup: (message) => { sent.push(message) },
+      },
+      sent,
+    }
+  }
+
+  /** Register one `task` template and invoke its handler (no effort plumbing). */
+  const invoke = async (config = {}, frontmatter = '', { rawInput = '', body = 'Do it.', agent } = {}) => {
+    await rm(prompts, { recursive: true, force: true })
+    await mkdir(prompts)
+    writeFileSync(join(prompts, 'task.md'), `---\ndescription: T\n${frontmatter}\n---\n${body}\n`)
+
+    const calls = []
+    const warnings = []
+    const commands = makeCommands()
+    const ctx = makeCtx(commands, {
+      subagents: {
+        startActivation: async (spec) => {
+          calls.push(spec)
+          return {
+            childId: 'child-1',
+            result: Promise.resolve({ output: [{ type: 'text', text: 'done' }], stopReason: 'completed' }),
+            dispose: async () => {},
+          }
+        },
+      },
+    }, { logger: { warn: (message) => warnings.push(message) } })
+
+    apply(ctx, { promptDirs: [prompts], ...config })
+    await settle()
+    const record = commands.active.get('task')
+    assert.ok(record, 'task registered')
+    const outcome = await record.definition.handler({
+      agent: agent ?? inlineAgent().agent,
+      rawInput,
+      signal: new AbortController().signal,
+    })
+    ctx.unload()
+    return { calls, warnings, outcome }
+  }
+
+  test('inline: stdout appends after the expanded body; args passed as argv', async () => {
+    const { agent, sent } = inlineAgent()
+    const { outcome } = await invoke({}, `command: ${ECHO_ARGS}`, {
+      agent,
+      rawInput: 'hello "two words"',
+      body: 'Review $@ carefully.',
+    })
+    assert.equal(outcome.kind, 'success')
+    assert.equal(sent.length, 1)
+    const text = sent[0].content.find((block) => block.type === 'text').text
+    assert.equal(text, 'Review hello two words carefully.\n\nout:hello,two words')
+  })
+
+  test('inline: $OUTPUT placeholder places the stdout inside the body', async () => {
+    const { agent, sent } = inlineAgent()
+    const { outcome } = await invoke({}, `command: ${ECHO_ARGS}`, {
+      agent,
+      rawInput: 'topic',
+      body: 'Context:\n$OUTPUT\n\nTask: review $@.',
+    })
+    assert.equal(outcome.kind, 'success')
+    const text = sent[0].content.find((block) => block.type === 'text').text
+    assert.equal(text, 'Context:\nout:topic\n\nTask: review topic.')
+  })
+
+  test('works with execution: subagent — the stdout ships in the spawn prompt', async () => {
+    const { calls, outcome } = await invoke({}, `execution: subagent\ncommand: ${ECHO_ARGS}`, {
+      rawInput: 'topic',
+      body: 'Summarize: $OUTPUT',
+    })
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0].prompt, [{ type: 'text', text: 'Summarize: out:topic' }])
+    assert.equal(outcome.kind, 'success')
+  })
+
+  test('a failing command returns an error result with the child stderr', async () => {
+    const { agent, sent } = inlineAgent()
+    const failing = `${process.execPath} -e 'console.error("boom"); process.exit(2)'`
+    const { outcome } = await invoke({}, `command: ${failing}`, { agent })
+    assert.equal(outcome.kind, 'error')
+    assert.match(outcome.text, /^\/task: the template's command failed: /u)
+    assert.match(outcome.text, /code 2/u)
+    assert.match(outcome.text, /boom/u)
+    assert.equal(sent.length, 0, 'no prompt was delivered when the command failed')
+  })
+
+  test('the failure text is localized with lang: zh', async () => {
+    const { agent } = inlineAgent()
+    const failing = `${process.execPath} -e 'process.exit(1)'`
+    const { outcome } = await invoke({ lang: 'zh' }, `command: ${failing}`, { agent })
+    assert.equal(outcome.kind, 'error')
+    assert.match(outcome.text, /^\/task：模板命令运行失败：/u)
+  })
+
+  test('no command frontmatter: the delivery path is untouched', async () => {
+    const { agent, sent } = inlineAgent()
+    const { outcome } = await invoke({}, '', { agent, rawInput: 'x', body: 'Plain.' })
+    assert.equal(outcome.kind, 'success')
+    const text = sent[0].content.find((block) => block.type === 'text').text
+    assert.equal(text, 'Plain.')
+  })
+
+  test('command-background: settles at once, prompt arrives only when the child exits', async () => {
+    const { agent, sent } = inlineAgent()
+    const slow = `${process.execPath} -e 'setTimeout(() => console.log("late out"), 250)'`
+    const { outcome } = await invoke({}, `command: ${slow}\ncommand-background: true`, {
+      agent,
+      rawInput: 'x',
+      body: 'Body $@.',
+    })
+    assert.equal(outcome.kind, 'success')
+    assert.match(outcome.text, /background/u)
+    assert.equal(sent.length, 0, 'no prompt (and no notice) before the child exits')
+
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    assert.equal(sent.length, 1, 'the folded prompt was delivered on child exit')
+    const text = sent[0].content.find((block) => block.type === 'text').text
+    assert.equal(text, 'Body x.\n\nlate out')
+  })
+
+  test('command-background: a failing child delivers a failure notice, not a prompt', async () => {
+    const { agent } = inlineAgent()
+    const injected = []
+    agent.inject = (message) => { injected.push(message) }
+    const failing = `${process.execPath} -e 'console.error("boom"); process.exit(2)'`
+    const { outcome } = await invoke({}, `command: ${failing}\ncommand-background: true`, { agent })
+    assert.equal(outcome.kind, 'success')
+
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    assert.equal(injected.length, 1, 'a failure notice was injected')
+    const text = injected[0].content.find((block) => block.type === 'text').text
+    assert.match(text, /^The \/task background command failed: /u)
+    assert.match(text, /code 2/u)
+    assert.match(text, /boom/u)
+  })
+
+  test('command-background with execution: subagent is ignored with a warning', async () => {
+    const { agent, sent } = inlineAgent()
+    const { calls, warnings, outcome } = await invoke({}, `execution: subagent\ncommand: ${ECHO_ARGS}\ncommand-background: true`, {
+      agent,
+      rawInput: 'topic',
+      body: 'Summarize: $OUTPUT',
+    })
+    assert.equal(outcome.kind, 'success', 'the subagent still started')
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0].prompt, [{ type: 'text', text: 'Summarize: out:topic' }])
+    assert.ok(warnings.some((w) => w.includes('/task') && w.includes('command-background')), 'warned about the ignored flag')
+    assert.equal(sent.length, 0, 'no inline prompt was delivered')
+  })
+
+  test('command-background honors command-timeout', async () => {
+    const { agent } = inlineAgent()
+    const injected = []
+    agent.inject = (message) => { injected.push(message) }
+    const slow = `${process.execPath} -e 'setTimeout(() => {}, 60_000)'`
+    const { outcome } = await invoke({}, `command: ${slow}\ncommand-background: true\ncommand-timeout: 100ms`, { agent })
+    assert.equal(outcome.kind, 'success')
+
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    assert.equal(injected.length, 1, 'the timeout produced a failure notice')
+    assert.match(injected[0].content.find((block) => block.type === 'text').text, /did not finish within 100ms/u)
   })
 })

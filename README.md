@@ -13,11 +13,6 @@ Changelog: [CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/america
 dsh --profile <name> plugin add dsh-prompt-commands
 ```
 
-Working from a checkout instead: `dsh --profile <name> plugin add link:$PWD`.
-
-Requires the dsh 0.2.2 host line (the flattened `startActivation` spec); on
-0.2.1 hosts `execution: subagent` templates fail — use plugin 0.2.x there.
-
 Row config (all optional):
 
 ```yaml
@@ -50,22 +45,17 @@ follow the browser's locale setting — no row config needed.
 | `~/.agents/prompts` (or `$DSH_AGENTS_HOME/prompts`) | all sessions |
 | each `config.promptDirs` entry | all sessions |
 
-Non-recursive, `.md` files only. Same-named templates across roots: the first
-registered holds the command; delete its file and a remaining copy picks the
-name up (live, no restart). Bad names, invalid YAML, unknown `execution`
-values, and unknown `effort` values are logged and skipped — never fatal.
-
-Templates live under `.agents` (where dsh finds skills), not pi's `.pi`
-directories — share files with pi via symlinks or `promptDirs`.
-
 ## Template format
 
 ```markdown
 ---
 description: One-line summary shown in the slash popup
 argument-hint: "[topic]"
-execution: inline            # optional: inline (default) | subagent
-effort: low                  # optional: none | low | medium | high — subagent templates only
+command: <command>                   # run at invocation, stdout folds into the prompt
+execution: inline | subagent         # default inline
+command-background: true | false     # default false
+command-timeout: <ms> | 30s/5m/1h | none   # default 10s
+effort: none | low | medium | high   # subagent templates only
 ---
 Template body with placeholders:
 
@@ -73,6 +63,7 @@ Template body with placeholders:
 - `$@` / `$ARGUMENTS` — all arguments, space-joined
 - `${@:N}` — arguments from N onward (1-based, bash-style)
 - `${@:N:L}` — L arguments starting at N
+- `$OUTPUT` / `${OUTPUT}` — the `command` stdout (only read when `command` is set)
 ```
 
 - The **command name is the filename** minus `.md` (lowercase, digits, `_`,
@@ -89,6 +80,28 @@ Template body with placeholders:
   command settles immediately, and a notice reports the outcome when the child
   settles. The child's model route is the row config `subagent` block when
   present, otherwise the session's route.
+
+### `command`
+
+Run a command when the template is invoked and fold its stdout into the
+expanded prompt (in addition to the body). The value is an executable plus
+optional fixed arguments, split bash-style — it runs the command with the
+provided arguments, spawned without a shell in the session's cwd. The body's
+argument placeholders (`$1`, `$@`, `$ARGUMENTS`, `${@:N}`) work in the
+command string too: when any is present, the arguments are substituted there
+instead of appended.
+
+- Command output is combined with the prompt body by replacing each
+  `$OUTPUT` / `${OUTPUT}` occurrence. If there is no such occurrence the
+  output is appended to the body.
+- Failure or timeout: the invocation returns an error carrying the child's
+  stderr and nothing is delivered to the session.
+- `command-timeout:` bounds the run — the default is 10 seconds; give a
+  millisecond number, a duration (`30s`, `5m`, `1h`), or `none` to let the
+  command run until it exits or the invocation is aborted.
+- `command-background: true` runs the command as a session-owned background
+  without giving the agent a turn. When the command completes the resulting
+  prompt is delivered as the next user message.
 
 ### `effort`
 

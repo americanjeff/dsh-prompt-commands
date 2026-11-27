@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Added: `command:` frontmatter — a command run when the template is invoked, with the command's arguments as trailing argv (spawned without a shell, in the session's cwd). Its stdout folds into the expanded prompt: it replaces `$OUTPUT` / `${OUTPUT}` occurrences in the body, or is appended after the body when the placeholder is absent. Applies to both `inline` and `subagent` delivery; a missing executable, nonzero exit, or timeout returns an error with the child's stderr.
+- Added: `command-timeout:` frontmatter — bounds the `command` run: a millisecond number, a duration (`30s`/`5m`/`1h`), or `none` (runs until the child exits or the invocation is aborted). Default 10s.
+- Added: `command-background: true` frontmatter — runs the `command` as a session-owned background child: the invocation settles immediately, and when the child exits the folded prompt is delivered as the agent's next user message (a failure arrives as a notice). Background commands default to no timeout; ignored with a warning on `execution: subagent` templates.
+- Changed: the `command` string interpolates the body's argument placeholders (`$1`, `$@`, `$ARGUMENTS`, `${@:N}`); when any is present the arguments are substituted there instead of appended as trailing argv.
+
 ## [0.3.0] - 2026-11-13
 
 - Works with the dsh 0.2.2 host line: the `startActivation` spec flattened its task options — `prompt`, `parent`, and `agentOptions` moved from the nested `request` object onto the spec itself (dsh commit `575606a`, first shipped in 0.2.2-rc.2). On a 0.2.2 host, plugin 0.2.0 failed subagent templates with `Failed to start the <name> subagent: Cannot read properties of undefined (reading 'id')` (the service read `spec.parent.id` on the now-missing parent).
